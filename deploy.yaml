@@ -25,12 +25,6 @@ Parameters:
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
     Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64
     Description: Latest Amazon Linux 2023 x86_64 AMI via SSM
-  AdminCidr:
-    Type: String
-    Description: CIDR block allowed to access Restate Admin port (9070)
-  IngressCidr:
-    Type: String
-    Description: CIDR block allowed to access Restate Ingress port (8080)
   AllowedIPs:
     Type: CommaDelimitedList
     Description: Comma-separated list of CIDR blocks (e.g. 74.110.139.240/32,203.0.113.15/32)
@@ -47,11 +41,23 @@ Resources:
         - IpProtocol: tcp
           FromPort: 8080
           ToPort: 8080
-          CidrIp: !Ref IngressCidr
+          CidrIp: !Select [0, !Ref AllowedIPs]
         - IpProtocol: tcp
           FromPort: 9070
           ToPort: 9070
-          CidrIp: !Ref AdminCidr
+          CidrIp: !Select [0, !Ref AllowedIPs]
+        - !If
+          - HasMoreIPs
+          - IpProtocol: tcp
+            FromPort: 443
+            ToPort: 443
+            CidrIp: !Select [1, !Ref AllowedIPs]
+          - !Ref AWS::NoValue
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-EC2-SG"
+      Conditions:
+        HasMoreIPs: !Not [!Equals [!Select [1, !Ref AllowedIPs], ""]]
 
   RestateSSMRole:
     Type: AWS::IAM::Role
