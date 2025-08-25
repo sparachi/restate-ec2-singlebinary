@@ -1,0 +1,198 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Create an Application Load Balancer (ALB) forwarding to Restate ingress (8080) and admin (9070)
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC Id for the ALB
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Subnets for the ALB
+  EC2InstanceId:
+    Type: AWS::EC2::Instance::Id
+    Description: EC2 instance to forward requests to
+  HostedZoneId:
+    Type: String
+    Description: Route53 Hosted Zone ID
+  RecordName:
+    Type: String
+    Description: DNS record name for the ALB
+  IngressDomainName:
+    Type: String
+    Description: Domain name for ingress traffic
+  AdminDomainName:
+    Type: String
+    Description: Domain name for admin traffic
+  AllowedIPs:
+    Type: CommaDelimitedList
+    Description: Comma-separated list of CIDR blocks (e.g. 74.110.139.240/32,203.0.113.15/32)
+
+Resources:
+  RestateCertificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Ref IngressDomainName
+      SubjectAlternativeNames:
+        - !Ref AdminDomainName
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: !Ref IngressDomainName
+          HostedZoneId: !Ref HostedZoneId
+        - DomainName: !Ref AdminDomainName
+          HostedZoneId: !Ref HostedZoneId
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for ALB. Allow access to ALB from specific IPs
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: !Select [0, !Ref AllowedIPs]
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Select [0, !Ref AllowedIPs]
+        - !If
+          - HasMoreIPs
+          - IpProtocol: tcp
+            FromPort: 443
+            ToPort: 443
+            CidrIp: !Select [1, !Ref AllowedIPs]
+          - !Ref AWS::NoValue
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-ALB-SG"
+      Conditions:
+        HasMoreIPs: !Not [!Equals [!Select [1, !Ref AllowedIPs], ""]]
+  ALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: RestateALB
+      Scheme: internet-facing
+      Subnets: !Ref SubnetIds
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+
+  # Target Group for Restate ingress (8080)
+  ALBTargetGroupIngress:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref VpcId
+      Protocol: HTTP
+      Port: 8080
+      TargetType: instance
+      HealthCheckProtocol: HTTP
+      HealthCheckPort: 8080
+      HealthCheckPath: /
+      Matcher:
+        HttpCode: 200-499
+      Targets:
+        - Id: !Ref EC2InstanceId
+          Port: 8080
+
+  # Target Group for Restate admin (9070)
+  ALBTargetGroupAdmin:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref VpcId
+      Protocol: HTTP
+      Port: 9070
+      TargetType: instance
+      HealthCheckProtocol: HTTP
+      HealthCheckPort: 9070
+      HealthCheckPath: /health
+      Matcher:
+        HttpCode: 200-499
+      Targets:
+        - Id: !Ref EC2InstanceId
+          Port: 9070
+
+  # Listener on port 80 with HTTP to HTTPS redirect
+  ALBListenerHTTPRedirect:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ALB
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: redirect
+          RedirectConfig:
+            Protocol: HTTPS
+            Port: "443"
+            StatusCode: HTTP_301
+  ALBListenerHTTPS:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ALB
+      Port: 443
+      Protocol: HTTPS
+      Certificates:
+        - CertificateArn: !Ref RestateCertificate
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroupIngress
+
+  # Listener Rule for /api/* → 8080 with host-header routing
+  ALBListenerRuleIngress:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref ALBListenerHTTPS
+      Priority: 1
+      Conditions:
+        - Field: host-header
+          HostHeaderConfig:
+            Values:
+              - !Ref IngressDomainName
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroupIngress
+
+  # Listener Rule for admin domain → 9070 with host-header routing
+  ALBListenerRuleAdmin:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref ALBListenerHTTPS
+      Priority: 10
+      Conditions:
+        - Field: host-header
+          HostHeaderConfig:
+            Values:
+              - !Ref AdminDomainName
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroupAdmin
+
+  # Route53 Record for the ALB
+  Route53Record:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref RecordName
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt ALB.DNSName
+        HostedZoneId: !GetAtt ALB.CanonicalHostedZoneID
+  IngressDNSRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref IngressDomainName
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt ALB.DNSName
+        HostedZoneId: !GetAtt ALB.CanonicalHostedZoneID
+  AdminDNSRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref AdminDomainName
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt ALB.DNSName
+        HostedZoneId: !GetAtt ALB.CanonicalHostedZoneID
+Outputs:
+  ALBDNSName:
+    Description: DNS name of the ALB
+    Value: !GetAtt ALB.DNSName
