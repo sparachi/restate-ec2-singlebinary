@@ -1,0 +1,107 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Minimal Restate single-node deployment (EC2 + EBS) for testing"
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC where to deploy
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Subnet within VPC (same AZ)
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: EC2 KeyPair for SSH (optional, leave blank if using SSM only)
+    Default: sparachi-keypair-1
+  InstanceType:
+    Type: String
+    Default: c7i.large
+    AllowedValues: [c7i.large, t3.medium]
+    Description: EC2 instance type for Restate server
+  DataVolumeSize:
+    Type: Number
+    Default: 20
+    Description: Size in GiB of EBS data volume
+  AMI:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64
+    Description: Latest Amazon Linux 2023 x86_64 AMI via SSM
+  AdminCidr:
+    Type: String
+    Description: CIDR block allowed to access Restate Admin port (9070)
+  IngressCidr:
+    Type: String
+    Description: CIDR block allowed to access Restate Ingress port (8080)
+  AllowedIPs:
+    Type: CommaDelimitedList
+    Description: Comma-separated list of CIDR blocks (e.g. 74.110.139.240/32,203.0.113.15/32)
+
+
+Resources:
+
+  RestateSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow Restate ports
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          CidrIp: !Ref IngressCidr
+        - IpProtocol: tcp
+          FromPort: 9070
+          ToPort: 9070
+          CidrIp: !Ref AdminCidr
+
+  RestateSSMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  RestateInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref RestateSSMRole]
+
+  RestateInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !Ref AMI
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds: [!Ref RestateSecurityGroup]
+      IamInstanceProfile: !Ref RestateInstanceProfile
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 20
+            VolumeType: gp3
+            DeleteOnTermination: true
+        - DeviceName: /dev/sdf
+          Ebs:
+            VolumeSize: !Ref DataVolumeSize
+            VolumeType: gp3
+            DeleteOnTermination: true
+      UserData:
+        Fn::Base64: !Sub |
+          ${file("restate-setup.sh")}
+    
+
+Outputs:
+  InstanceId:
+    Description: EC2 Instance ID
+    Value: !Ref RestateInstance
+  PublicIP:
+    Description: Public IP of instance
+    Value: !GetAtt RestateInstance.PublicIp
+  AdminURL:
+    Description: Admin UI URL
+    Value: !Sub "http://${RestateInstance.PublicIp}:9070"
