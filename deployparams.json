@@ -1,0 +1,43 @@
+
+[
+  {
+    "ParameterKey": "VpcId",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "SubnetIds",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "AdminCidr",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "IngressCidr",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "EC2InstanceId",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "HostedZoneId",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "RecordName",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "IngressDomainName",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "AdminDomainName",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "AllowedIPs",
+    "ParameterValue": ""
+  }
+]
