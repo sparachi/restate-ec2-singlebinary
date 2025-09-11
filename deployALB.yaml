@@ -54,18 +54,13 @@ Resources:
           FromPort: 443
           ToPort: 443
           CidrIp: !Select [0, !Ref AllowedIPs]
-        - !If
-          - HasMoreIPs
-          - IpProtocol: tcp
-            FromPort: 443
-            ToPort: 443
-            CidrIp: !Select [1, !Ref AllowedIPs]
-          - !Ref AWS::NoValue
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Select [0, !Ref AllowedIPs]
       Tags:
         - Key: Name
           Value: !Sub "${AWS::StackName}-ALB-SG"
-      Conditions:
-        HasMoreIPs: !Not [!Equals [!Select [1, !Ref AllowedIPs], ""]]
   ALB:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:

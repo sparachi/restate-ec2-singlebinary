@@ -22,9 +22,9 @@ curl https://checkip.amazonaws.com
 
 # Create EC2 stack
 ```
-aws cloudformation create-stack \
+aws cloudformation deploy \
   --stack-name RestateEC2Stack \
-  --template-file file://deploy.yaml \
+  --template-file /<full filepath>/deploy.yaml \
   --parameter-overrides file:///<full filepath>/deployparams.json \
   --capabilities CAPABILITY_NAMED_IAM
 
