@@ -169,6 +169,7 @@ Resources:
       AliasTarget:
         DNSName: !GetAtt ALB.DNSName
         HostedZoneId: !GetAtt ALB.CanonicalHostedZoneID
+        Action: UPSERT
   IngressDNSRecord:
     Type: AWS::Route53::RecordSet
     Properties:
@@ -178,6 +179,7 @@ Resources:
       AliasTarget:
         DNSName: !GetAtt ALB.DNSName
         HostedZoneId: !GetAtt ALB.CanonicalHostedZoneID
+        Action: UPSERT
   AdminDNSRecord:
     Type: AWS::Route53::RecordSet
     Properties:
@@ -187,6 +189,7 @@ Resources:
       AliasTarget:
         DNSName: !GetAtt ALB.DNSName
         HostedZoneId: !GetAtt ALB.CanonicalHostedZoneID
+        Action: UPSERT
 Outputs:
   ALBDNSName:
     Description: DNS name of the ALB
