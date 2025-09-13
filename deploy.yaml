@@ -28,7 +28,15 @@ Parameters:
   AllowedIPs:
     Type: CommaDelimitedList
     Description: Comma-separated list of CIDR blocks (e.g. 74.110.139.240/32,203.0.113.15/32)
+  ExistingVolumeId:
+    Type: String
+    Default: ""
+    Description: "Optional: specify an existing EBS volume to attach instead of creating a new one"
 
+Conditions:
+  CreateNewVolume: !Equals
+    - !Ref ExistingVolumeId
+    - ""
 
 Resources:
 
@@ -65,11 +73,45 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
-
+      Policies:
+        - PolicyName: AllowAssumeRestateLambda
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: sts:AssumeRole
+                Resource: arn:aws:iam::249990224526:role/restate-lambda-exec
+        - PolicyName: AllowInvokeRestateLambdas
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: "lambda:InvokeFunction"
+                Resource: "arn:aws:lambda:us-east-1:249990224526:function:*"
   RestateInstanceProfile:
     Type: AWS::IAM::InstanceProfile
     Properties:
       Roles: [!Ref RestateSSMRole]
+
+  RestateDataVolume:
+    Type: AWS::EC2::Volume
+    Condition: CreateNewVolume
+    DeletionPolicy: Retain
+    Properties:
+      AvailabilityZone: !GetAtt RestateInstance.AvailabilityZone
+      Size: !Ref DataVolumeSize
+      VolumeType: gp3
+      Encrypted: true
+      Tags:
+        - Key: Name
+          Value: "RestateData"
+
+  RestateDataVolumeAttachment:
+    Type: AWS::EC2::VolumeAttachment
+    Properties:
+      Device: /dev/sdf
+      InstanceId: !Ref RestateInstance
+      VolumeId: !If [CreateNewVolume, !Ref RestateDataVolume, !Ref ExistingVolumeId]
 
   RestateInstance:
     Type: AWS::EC2::Instance
@@ -82,19 +124,13 @@ Resources:
       BlockDeviceMappings:
         - DeviceName: /dev/xvda
           Ebs:
-            VolumeSize: 20
-            VolumeType: gp3
-            DeleteOnTermination: true
-        - DeviceName: /dev/sdf
-          Ebs:
-            VolumeSize: !Ref DataVolumeSize
+            VolumeSize: 10
             VolumeType: gp3
             DeleteOnTermination: true
       UserData:
         Fn::Base64: !Sub |
           #!/bin/bash
-          set -eux
-
+          set -euxo pipefail
           # Directory to install binaries (global)
           BIN=/usr/local/bin
 
@@ -103,9 +139,10 @@ Resources:
 
           # Install dependencies
           yum install -y xfsprogs unzip curl || true
-
-          # Download Restate server and CLI
-          curl -L --remote-name-all \
+          # Install Restate binaries if missing
+          RESTATE_BIN="/usr/local/bin/restate-server"
+          if [ ! -f "$RESTATE_BIN" ]; then
+            curl -L --remote-name-all \
               https://restate.gateway.scarf.sh/latest/restate-server-$RESTATE_PLATFORM.tar.xz \
               https://restate.gateway.scarf.sh/latest/restate-cli-$RESTATE_PLATFORM.tar.xz
 
@@ -119,54 +156,94 @@ Resources:
           # Move binaries to /usr/local/bin
           sudo mv restate-server $BIN
           sudo mv restate $BIN
-
-          # Create system user for restate
-          sudo useradd --system --create-home --home-dir /var/lib/restate --shell /sbin/nologin restate || true
-          sudo mkdir -p /var/lib/restate
-          sudo chown -R restate:restate /var/lib/restate
-
-          # Create minimal restate.toml
-          sudo tee /etc/restate.toml <<EOF
+          fi
+          # Create /etc/restate.toml if missing
+          if [ ! -f /etc/restate.toml ]; then
+            cat > /etc/restate.toml <<EOF
+          [server]
+          http_addr = "0.0.0.0:8080"
+          admin_addr = "0.0.0.0:9070"
+          data_dir = "/var/lib/restate/data"
           cluster.name = "restate-single"
           node.name    = "restate-1"
           auto-provision = true
-
-          [admin]
-          bind-address = "0.0.0.0:9070"
-
-          [ingress]
-          bind-address = "0.0.0.0:8080"
-
-          [metadata-server]
-          addresses = ["http://127.0.0.1:5122/"]
-          replication-factor = 1
-
-          [log-server]
-          addresses = ["http://127.0.0.1:5121/"]
-          replication-factor = 1
           EOF
+          fi
+          # Mount and format /dev/sdf if present, preserving existing data
+          
+          DATA_DEV=""
+          timeout=60
+          while [ -z "$DATA_DEV" ] && [ $timeout -gt 0 ]; do
+              for candidate in /dev/sdf /dev/nvme1n1; do
+                  if [ -b "$candidate" ]; then
+                      DATA_DEV=$candidate
+                      break
+                  fi
+              done
+              if [ -z "$DATA_DEV" ]; then
+                  echo "Waiting for EBS device to appear..."
+                  sleep 1
+                  timeout=$((timeout - 1))
+              fi
+          done
 
-          # Create systemd service
-          sudo tee /etc/systemd/system/restate-server.service <<EOF
+          if [ -z "$DATA_DEV" ]; then
+            echo "ERROR: No EBS device found after 60 seconds. Exiting."
+            exit 1
+          fi
+
+          DATA_MNT="/var/lib/restate/data"
+
+          lsblk
+          df -h | grep $DATA_MNT || true
+
+          if [ -b "$DATA_DEV" ]; then
+            # Always create the mount point directory
+            mkdir -p "$DATA_MNT"
+            # Check if the device is already mounted
+            if ! mountpoint -q "$DATA_MNT"; then
+              echo "looks like $DATA_DEV is not mounted, mounting..."
+              # Only format if the directory is empty and device has no filesystem
+              if [ -z "$(ls -A $DATA_MNT 2>/dev/null)" ]; then
+                echo "looks like $DATA_MNT is empty, checking filesystem..."
+                if ! blkid "$DATA_DEV" &>/dev/null; then
+                  echo "formatting $DATA_DEV with XFS..."
+                  mkfs.xfs -f "$DATA_DEV"
+                fi
+              fi
+              grep -q "$DATA_MNT" /etc/fstab || echo "$DATA_DEV $DATA_MNT xfs defaults,nofail 0 2" >> /etc/fstab
+              mount "$DATA_MNT"
+              echo "adding $DATA_MNT to fstab to mount on reboot"
+            fi
+          else
+            echo "ERROR: No EBS device found after 60 seconds. Exiting."
+            exit 1
+          fi
+
+          chown -R ec2-user:ec2-user "$DATA_MNT"
+          chmod 700 "$DATA_MNT"
+          # Create systemd service if missing
+          SERVICE_FILE="/etc/systemd/system/restate-server.service"
+          if [ ! -f "$SERVICE_FILE" ]; then
+            cat > "$SERVICE_FILE" <<EOF
           [Unit]
           Description=Restate Server
-          After=network-online.target
-          Wants=network-online.target
+          After=network.target
+          RequiresMountsFor=/var/lib/restate/data
 
           [Service]
-          User=restate
-          Group=restate
-          WorkingDirectory=/var/lib/restate
-          ExecStart=$BIN/restate-server --config-file /etc/restate.toml
+          Type=simple
+          User=ec2-user
+          ExecStartPre=/usr/bin/mountpoint -q /var/lib/restate/data
+          ExecStart=$RESTATE_BIN --config-file /etc/restate.toml
           Restart=on-failure
-          RestartSec=3s
-          LimitNOFILE=1048576
+          WorkingDirectory=/var/lib/restate/data
 
           [Install]
           WantedBy=multi-user.target
           EOF
-
-          # Enable and start the service
+          fi
+          chmod 644 "$SERVICE_FILE"
           sudo systemctl daemon-reload
           sudo systemctl enable --now restate-server
           sudo systemctl status restate-server || true
@@ -175,8 +252,13 @@ Resources:
           $BIN/restate-server --version
           $BIN/restate --version
 
+          curl http://localhost:9070/ui/overview
+
           echo "Restate server setup complete. Check logs at /var/log/restate-server.log"
           echo "You can access the admin UI at http://<instance-ip>:9070"
+
+          # Sanity check: confirm mount success in logs
+          mount | grep /var/lib/restate/data || echo "WARNING: /var/lib/restate/data not mounted"
 Outputs:
   InstanceId:
     Description: EC2 Instance ID
@@ -186,4 +268,4 @@ Outputs:
     Value: !GetAtt RestateInstance.PublicIp
   AdminURL:
     Description: Admin UI URL
-    Value: !Sub "http://${RestateInstance.PublicIp}:9070"
+    Value: !Sub "http://${RestateInstance.PublicIp}:9070/ui/overview"
