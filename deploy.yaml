@@ -157,18 +157,14 @@ Resources:
           sudo mv restate-server $BIN
           sudo mv restate $BIN
           fi
-          # Create /etc/restate.toml if missing
-          if [ ! -f /etc/restate.toml ]; then
-            cat > /etc/restate.toml <<EOF
-          [server]
-          http_addr = "0.0.0.0:8080"
-          admin_addr = "0.0.0.0:9070"
+          # Always rewrite /etc/restate.toml with fixed node identity
+          cat > /etc/restate.toml <<EOF
           data_dir = "/var/lib/restate/data"
-          cluster.name = "restate-single"
-          node.name    = "restate-1"
+          cluster-name = "restate-persistent-single-node-cluster"
+          node-name = "restate-persistent-node"
+          node-id = "123456"
           auto-provision = true
           EOF
-          fi
           # Mount and format /dev/sdf if present, preserving existing data
           
           DATA_DEV=""
@@ -228,7 +224,7 @@ Resources:
             cat > "$SERVICE_FILE" <<EOF
           [Unit]
           Description=Restate Server
-          After=network.target
+          After=network.target cloud-init.service
           RequiresMountsFor=/var/lib/restate/data
 
           [Service]
